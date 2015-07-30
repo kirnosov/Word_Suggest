@@ -1,0 +1,8 @@
+name: Word_Suggest
+account: kirnosov
+server: shinyapps.io
+bundleId: 229044
+url: https://kirnosov.shinyapps.io/Word_Suggest
+when: 1438242573.91758
+asMultiple: FALSE
+asStatic: FALSE

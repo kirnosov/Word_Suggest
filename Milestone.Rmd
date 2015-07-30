@@ -1,0 +1,380 @@
+---
+title: "The Milestone Report"
+author: N. Kirnosov
+output: html_document
+---
+
+```{r, library load, message=FALSE, echo=FALSE}
+library(RWekajars)
+library(qdapDictionaries)
+library(qdapRegex)
+library(qdapTools)
+library(RColorBrewer)
+library(qdap)
+library(NLP)
+library(tm)
+library(SnowballC)
+library(slam)
+library(RWeka)
+library(rJava)
+library(wordcloud)
+library(stringr)
+library(DT)
+library(stringi)
+library(googleVis)
+library(ggplot2)
+library(plyr)
+set.seed(1)
+multiplot <- function(..., plotlist = NULL, file, cols = 1, layout = NULL) {
+        require(grid)
+        
+        plots <- c(list(...), plotlist)
+        
+        numPlots = length(plots)
+        
+        if (is.null(layout)) {
+                layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                                 ncol = cols, nrow = ceiling(numPlots/cols))
+        }
+        
+        if (numPlots == 1) {
+                print(plots[[1]])
+                
+        } else {
+                grid.newpage()
+                pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+                
+                for (i in 1:numPlots) {
+                        matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+                        
+                        print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                                        layout.pos.col = matchidx$col))
+                }
+        }
+}
+```
+
+# Introduction
+
+In this milestone report we will cover basic data acquisition, elucidate its structure,
+perform some exploratory analysis and discuss the findings. Also, a vision of the 
+word suggesting mechanism will be presented.
+
+# Getting Data
+
+The data set was downloaded from the [link provided](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip)
+on the course web site. English directory was used to create Twitter, News, and Blogs
+text samples. Also, for future use, [google-banned words](https://gist.github.com/jamiew/1112488/raw/7ca9b1669e1c24b27c66174762cb04e14cf05aa7/google_twunter_lol) were read.
+
+```{r, get data, echo=FALSE}
+if (!file.exists("data")) {
+        dir.create("data")
+        fileUrl <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+        download.file(fileUrl, destfile = "./data/CS.zip", method = "curl")
+        list.files("./data")
+        dateDownloaded <- date()
+        
+        unzip('data//CS.zip',exdir='data/')
+        list.files('data/final/')
+        list.files('data/final//en_US')
+}
+```
+
+```{r, read data, echo=FALSE, cache=TRUE, message=FALSE, warning=FALSE}
+twits <- readLines('data/final/en_US/en_US.twitter.txt', encoding = 'UTF-8')
+news <- readLines('data/final/en_US/en_US.news.txt', encoding = 'UTF-8')
+blogs <- readLines('data/final/en_US/en_US.blogs.txt', encoding = 'UTF-8')
+TheSample <- c(twits,news,blogs)
+curse_words <- rownames(read.csv("https://gist.github.com/jamiew/1112488/raw/
+                                 7ca9b1669e1c24b27c66174762cb04e14cf05aa7/google_twunter_lol",
+                                 sep=":"))
+curse_words<-curse_words[1:(length(curse_words)-1)]
+```
+
+# Files Summary
+
+Some basic features of the available data sets are shown below.
+
+```{r, get data statistics, echo=FALSE, cache=TRUE}
+count_twits <- str_length(twits)
+count_news <- str_length(news)
+count_blogs <- str_length(blogs)
+
+library(knitr)
+
+twits_num <- c(length(twits),
+               (round(object.size(twits)/(1024*1024),0)[1]),
+               median(count_twits),
+               max(count_twits))
+news_num <- c(length(news),
+              round(object.size(news)/(1024*1024),0)[1],
+              median(count_news),
+              max(count_news))
+blogs_num <- c(length(blogs),
+               round(object.size(blogs)/(1024*1024),0)[1],
+               median(count_blogs),
+               max(count_blogs))
+df <- as.data.frame(rbind(twits_num,news_num,blogs_num))
+rownames(df) <- c('twits','news','blogs')
+colnames(df) <- c('# of lines',"memory allocated, MB",
+                  "Median message length","Max message length")
+kable(df, align='c', caption = "Summary of the datasets")
+```
+
+After reading a few data entries from each goup, we can suggest:
+
+- twits are short (no longer than 140) and are known to have lots of informal lexicon,
+
+- news are more formal, but topics covered are somewhat narrow,
+
+- the style of blogs is between twitter and news styles.
+
+From the data processing standpoint we can note that while twits come in the biggest 
+file and news have the greatest meadian number of characters per entry, blogs 
+pocessing is likely to present the biggest challenge due to the presence of very
+long messages.
+
+# Tokenization
+
+Using the functions below, we 
+
+- change the text to lower case,
+
+- remove punctuation, 
+
+- remove numbers, 
+
+- remove urls,
+
+- remove profanity words,
+
+- remove stop words, and 
+
+- stem the document.
+
+Next, `NGramTokenizer` from `RWeka` package will be used to create 1, 2, 3, and 4 gram
+tokens.
+
+```{r, define functions, echo=FALSE, message=FALSE}
+tokenize_n <- function(theCorpus, ngramCount) {
+        ngram <- NGramTokenizer(theCorpus,Weka_control(min = ngramCount, max = ngramCount,
+                                                       delimiters = " \\r\\n\\t.,;:\"()?!"))
+        ngram <- data.frame(table(ngram))
+        ngram <- ngram[order(ngram$Freq, 
+                             decreasing = TRUE),]
+        colnames(ngram) <- c("String","Count")
+        ngram
+}
+
+removeURL <- function(x) gsub("http[[:alnum:]]*", "", x) 
+
+get_tokens<-function(Sample){
+        cleanSample <- Corpus(VectorSource(Sample))
+        cleanSample <- tm_map(cleanSample,content_transformer(tolower))
+        cleanSample <- tm_map(cleanSample,content_transformer(removePunctuation))
+        cleanSample <- tm_map(cleanSample,content_transformer(removeNumbers))
+        cleanSample <- tm_map(cleanSample,stripWhitespace)
+        cleanSample <- tm_map(cleanSample,removeWords, stopwords("english"))
+        cleanSample <- tm_map(cleanSample,content_transformer(removeURL))
+        cleanSample <- tm_map(cleanSample,removeWords, as.character(curse_words))
+        cleanSample <- tm_map(cleanSample,stemDocument,language = ("english"))
+        cleanSample <- tm_map(cleanSample,stripWhitespace)
+        Corpus <-data.frame(text=unlist(sapply(cleanSample,`[`, "content")), 
+                            stringsAsFactors = FALSE)
+        unigram <- tokenize_n(Corpus,1)
+        bigram <- tokenize_n(Corpus,2)
+        trigram <- tokenize_n(Corpus,3)
+        quadgram <- tokenize_n(Corpus,4)
+        return(list("Unigram"=unigram,
+                    "Bigram"=bigram,
+                    "Trigram"=trigram,
+                    "Quadgram"=quadgram))
+}
+
+get_grams <- function(Sample,step=10000){
+        
+        unigram <- data.frame(String=factor(),Count=integer())
+        bigram <-  data.frame(String=factor(),Count=integer())
+        trigram <-  data.frame(String=factor(),Count=integer())
+        quadgram <-  data.frame(String=factor(),Count=integer())
+        
+        NS=length(Sample)
+        vec<-seq(1,NS,step)
+        for(i in vec){
+                nmin=i
+                nmax=min((i+step-1),NS)
+                tokens <- get_tokens(Sample[nmin:nmax])
+                
+                unigram <- rbind(unigram,tokens$Unigram)
+                unigram <- aggregate(unigram[,2],by=list(String=unigram$String),FUN=sum)
+                colnames(unigram)<-c("String","Count")
+                
+                bigram <- rbind(bigram,tokens$Bigram)
+                bigram <- aggregate(bigram[,2],by=list(String=bigram$String),FUN=sum)
+                colnames(bigram)<-c("String","Count")
+                
+                trigram <- rbind(trigram,tokens$Trigram)
+                trigram <- aggregate(trigram[,2],by=list(String=trigram$String),FUN=sum)
+                colnames(trigram)<-c("String","Count")
+                
+                quadgram <- rbind(quadgram,tokens$Quadgram)
+                quadgram <- aggregate(quadgram[,2],by=list(String=quadgram$String),FUN=sum)
+                colnames(quadgram)<-c("String","Count")
+                
+                print(paste0(round(nmax/NS*100,2),"% done"))
+        }
+        return(list("Unigram"=unigram,
+                    "Bigram"=bigram,
+                    "Trigram"=trigram,
+                    "Quadgram"=quadgram))
+}
+```
+
+All the sample processing and tokenization is done inside the `get_tokens` function.
+Using this function, we can work around memory limitations and process the files 
+of virtually any size by varying `step` value in the `get_grams` function.
+
+We will sample 100,000 messages from each data set. Data will be processed in
+chunks of 5,000 entries and resulting n-gramms will be aggregated.
+
+```{r, get tokens, cache=TRUE, message=FALSE}
+sample_size=100000
+step=5000
+twits_grams <- get_grams(sample(twits,min(sample_size,length(twits))),step=step)
+news_grams <- get_grams(sample(news,min(sample_size,length(news))),step=step)
+blogs_grams <- get_grams(sample(blogs,min(sample_size,length(blogs))),step=step)
+```
+
+# Style comparison
+
+Top 10 n-Grams (n=1,..,4) for each category are shown below.
+
+```{r, bar plots, message=FALSE, echo=FALSE}
+# 1
+df<-arrange(twits_grams$Unigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1t <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="ivory1") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("UniGrams") + ylab("Count") + ggtitle("Twits") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(news_grams$Unigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1n <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="ivory1") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("UniGrams") + ylab("Count") + ggtitle("News") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(blogs_grams$Unigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1b <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="ivory1") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("UniGrams") + ylab("Count") + ggtitle("Blogs") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+multiplot(plot1t,plot1n,plot1b,cols=3)
+
+# 2
+df<-arrange(twits_grams$Bigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1t <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="palegreen1") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("BiGrams") + ylab("Count") + ggtitle("Twits") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(news_grams$Bigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1n <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="palegreen1") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("BiGrams") + ylab("Count") + ggtitle("News") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(blogs_grams$Bigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1b <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="palegreen1") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("BiGrams") + ylab("Count") + ggtitle("Blogs") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+multiplot(plot1t,plot1n,plot1b,cols=3)
+
+# 3
+df<-arrange(twits_grams$Trigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1t <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="steelblue2") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("TriGrams") + ylab("Count") + ggtitle("Twits") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(news_grams$Trigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1n <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="steelblue2") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("TriGrams") + ylab("Count") + ggtitle("News") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(blogs_grams$Trigram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1b <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="steelblue2") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("TriGrams") + ylab("Count") + ggtitle("Blogs") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+multiplot(plot1t,plot1n,plot1b,cols=3)
+
+# 4
+df<-arrange(twits_grams$Quadgram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1t <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="khaki2") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("QuadGrams") + ylab("Count") + ggtitle("Twits") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(news_grams$Quadgram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1n <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="khaki2") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("QuadGrams") + ylab("Count") + ggtitle("News") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+df<-arrange(blogs_grams$Quadgram,Count,decreasing=TRUE)[10:1,]
+df$f <- factor(df$String, levels=df$String)
+plot1b <-ggplot(df, aes(x = f, y = Count)) +
+        geom_bar(stat = "identity", color="gray55", fill="khaki2") +
+        geom_text(data=df,aes(x=String,y=(Count*0.8),label=Count),vjust=0, size=3) +
+        xlab("QuadGrams") + ylab("Count") + ggtitle("Blogs") +
+        theme(plot.title = element_text(lineheight=.8, face="bold")) +
+        coord_flip()
+plot1t
+plot1n
+plot1b
+```
+
+# Model development directions
+
+From the comparison of twitter, news, and blogs styles it we can conclude
+that it would be wise to develop somewhat different models for different 
+communication cases. For example, if the text is imputted into a social
+network message, higher weight should be given to tokens obtained from 
+Twitter.
+
+The model is expected to suggest words as the user types the word
+(e.g., if 'unive' is typed, 'university' and 'universe' should be suggested).
+This prediction will be based on the unigrams frequencies.
+Next, after several words will be typed in, next word prediction will be made
+based on n-grams frequencies, starting from n=4 and ending (if nescessary) 
+with n=1.
+
+Of course, more work needs to be done to produce more sensible and informative 
+n-grams, especially from Twitter data.
